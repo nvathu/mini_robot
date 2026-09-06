@@ -1,4 +1,3 @@
-import torch
 import cv2
 import json
 import numpy as np
@@ -6,32 +5,42 @@ import pandas as pd
 import glob
 import os
 import matplotlib.pyplot as plt
-from model import ResNetDepth
-from geometric_projection import world_to_camera_frame, project_to_pixel
 
 IMG_DIR = "dataset/rgb"
 POSE_CSV = "dataset/poses/records_20250813-1535.csv"
 INTRINSICS_PATH = "dataset/calib/intrinsics.json"
-GLOBAL_SCALE_PATH = "dataset/calib/global_scale.json"
-WEIGHTS_PATH = "weights/best_model.pth"
-TARGET_ROBOTS = ["S1", "S2"]
-MARGIN_RATIO = 0.15
-ROBOT_SIZE_M = 0.15
-N_FRAMES = 6
-OUT_DIR = "test_pipeline_output"
+TARGET_ROBOT = "S1"
+OUT_DIR = "test_projection_output"
 os.makedirs(OUT_DIR, exist_ok=True)
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
 
 with open(INTRINSICS_PATH) as f:
     K = json.load(f)
-with open(GLOBAL_SCALE_PATH) as f:
-    GS = json.load(f)
-GLOBAL_SCALE = GS["global_scale"]
 
-model = ResNetDepth().to(device)
-model.load_state_dict(torch.load(WEIGHTS_PATH, map_location=device))
-model.eval()
+def world_to_camera_frame(self_x, self_y, self_angle, target_x, target_y, angle_sign=1):
+    self_angle = angle_sign * np.radians(self_angle)
+    dx = target_x - self_x
+    dy = target_y - self_y
+    forward = np.cos(-self_angle) * dx - np.sin(-self_angle) * dy
+    lateral = np.sin(-self_angle) * dx + np.cos(-self_angle) * dy
+    return forward, lateral
+
+def project_to_pixel(forward_mm, lateral_mm, fx, fy, cx, cy, height_mm=0.0, pitch_deg=0.0):
+    forward_m = forward_mm / 1000.0
+    lateral_m = lateral_mm / 1000.0
+    height_m = height_mm / 1000.0
+    if forward_m <= 0.02:
+        return None
+    u = cx + (lateral_m * fx / forward_m)
+    if pitch_deg == 0.0:
+        v = cy + (height_m * fy / forward_m)
+    else:
+        theta = np.radians(pitch_deg)
+        Y_rot = height_m * np.cos(theta) - forward_m * np.sin(theta)
+        Z_rot = height_m * np.sin(theta) + forward_m * np.cos(theta)
+        if Z_rot <= 0.02:
+            return None
+        v = cy + (Y_rot * fy / Z_rot)
+    return u, v
 
 df = pd.read_csv(POSE_CSV)
 img_files = sorted(glob.glob(f"{IMG_DIR}/*.png"))
@@ -44,103 +53,54 @@ def find_img(ts, max_gap=0.03):
     i = np.argmin(np.abs(img_ts - ts))
     return img_files[i] if abs(img_ts[i] - ts) <= max_gap else None
 
-@torch.no_grad()
-def predict_depth(img_path):
-    img = cv2.imread(img_path)
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img_small = cv2.resize(img_rgb, (180, 180))
-    tensor = torch.tensor(img_small / 255.).permute(2, 0, 1).unsqueeze(0).float().to(device)
-    pred = model(tensor).squeeze().cpu().numpy()
-    return pred, img.shape[:2], img_small
-
-def mask_dynamic_robots(depth_map, row, self_pose, w0, h0):
-    masked = depth_map.copy()
-    for tgt in TARGET_ROBOTS:
-        tx = f'car_{tgt}_pose_x'
-        if tx not in row or pd.isna(row[tx]):
-            continue
-        target_pose = {'x': row[tx], 'y': row[f'car_{tgt}_pose_y']}
-        forward, lateral = world_to_camera_frame(self_pose['x'], self_pose['y'], self_pose['angle'],
-                                                    target_pose['x'], target_pose['y'])
-        if forward <= 50:
-            continue
-        result = project_to_pixel(forward, lateral, K['fx'], K['fy'], K['cx'], K['cy'])
-        if result is None:
-            continue
-        u, v = result
-        u_s, v_s = u * 180 / w0, v * 180 / h0
-        margin = MARGIN_RATIO * 180
-        if not (margin <= u_s < 180 - margin):
-            continue
-        r_px = (K['fx'] * ROBOT_SIZE_M / (forward / 1000.0)) * 180 / w0
-        cv2.rectangle(masked, (int(u_s - r_px), 0), (int(u_s + r_px), 180), 0, thickness=-1)
-    return masked
-
-def unproject(depth_map, fx, fy, cx, cy, rgb_image, max_depth=3.0):
-    H, W = depth_map.shape
-    u, v = np.meshgrid(np.arange(W), np.arange(H))
-    valid = (depth_map > 0) & (depth_map < max_depth)
-    z = depth_map[valid]
-    x = (u[valid] - cx) * z / fx
-    y = (v[valid] - cy) * z / fy
-    points = np.stack([x, y, z], axis=1)
-    colors = rgb_image[valid] / 255.0
-    return points, colors
-
-def transform_to_world(points, self_pose):
-    if len(points) == 0:
-        return points
-    angle = np.radians(self_pose['angle'])
-    c, s = np.cos(angle), np.sin(angle)
-    X, Z = points[:, 0], points[:, 2]
-    X_w = c * X + s * Z
-    Z_w = -s * X + c * Z
-    x_f = X_w + self_pose['x'] / 1000.0
-    z_f = Z_w + self_pose['y'] / 1000.0
-    return np.stack([x_f, points[:, 1], z_f], axis=1)
-
-
-valid_rows = []
+candidates = []
 for idx in range(len(df)):
     row = df.iloc[idx]
     if pd.isna(row['self_pose_x']) or pd.isna(row['self_pose_y']) or pd.isna(row['self_pose_angle']):
         continue
-    ts = row['pose_timestamp'] / 1e9
-    if find_img(ts) is not None:
-        valid_rows.append(idx)
-
-step = max(1, len(valid_rows) // N_FRAMES)
-selected_rows = valid_rows[::step][:N_FRAMES]
-print(f"Testing {len(selected_rows)} frames")
-
-all_points, all_colors = [], []
-for csv_idx in selected_rows:
-    row = df.iloc[csv_idx]
+    tx = f'car_{TARGET_ROBOT}_pose_x'
+    if tx not in row or pd.isna(row[tx]):
+        continue
     ts = row['pose_timestamp'] / 1e9
     img_path = find_img(ts)
+    if img_path is None:
+        continue
     self_pose = {'x': row['self_pose_x'], 'y': row['self_pose_y'], 'angle': row['self_pose_angle']}
+    target_pose = {'x': row[tx], 'y': row[f'car_{TARGET_ROBOT}_pose_y']}
+    forward, lateral = world_to_camera_frame(self_pose['x'], self_pose['y'], self_pose['angle'],
+                                                target_pose['x'], target_pose['y'])
+    if forward > 100:
+        candidates.append((idx, img_path, forward, lateral))
 
-    raw_depth, orig_shape, img_small = predict_depth(img_path)
-    h0, w0 = orig_shape
-    raw_depth = mask_dynamic_robots(raw_depth, row, self_pose, w0, h0)
+print(f"Found {len(candidates)} frame has {TARGET_ROBOT} in fornt of camera")
 
-    depth_metric = raw_depth * GLOBAL_SCALE
-    points, colors = unproject(depth_metric, K['fx'], K['fy'],
-                                 K['cx'] * 180 / w0, K['cy'] * 180 / h0, img_small)
-    points_world = transform_to_world(points, self_pose)
-    all_points.append(points_world)
-    all_colors.append(colors)
-    print(f"csv_idx={csv_idx}  {len(points_world)} points")
+candidates.sort(key=lambda c: c[3])
+pick_idx = np.linspace(0, len(candidates) - 1, 6).astype(int)
+samples = [candidates[i] for i in pick_idx]
 
-points = np.concatenate(all_points, axis=0)
-colors = np.concatenate(all_colors, axis=0)
-np.savez(f"{OUT_DIR}/pipeline_test_pointcloud.npz", points=points, colors=colors)
+fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+for ax, (csv_idx, img_path, forward, lateral) in zip(axes.flat, samples):
+    img = cv2.imread(img_path)
+    if img is None:
+        ax.axis('off')
+        continue
 
-fig, ax = plt.subplots(figsize=(7, 7))
-ax.scatter(points[:, 0], points[:, 2], c=np.clip(colors * 2.2, 0, 1), s=2, alpha=0.5)
-ax.set_xlabel("X (m)"); ax.set_ylabel("Z (m)")
-ax.set_aspect('equal')
-ax.set_title(f"Pipeline test output, {len(selected_rows)} frames")
+    result = project_to_pixel(forward, lateral, K['fx'], K['fy'], K['cx'], K['cy'])
+    if result is not None:
+        u, v = result
+        cv2.circle(img, (int(u), int(v)), 10, (0, 255, 0), 2)
+        cv2.line(img, (int(u) - 15, int(v)), (int(u) + 15, int(v)), (0, 255, 0), 1)
+        cv2.line(img, (int(u), int(v) - 15), (int(u), int(v) + 15), (0, 255, 0), 1)
+
+    ax.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    ax.set_title(f"lateral={lateral:.0f}mm  forward={forward:.0f}mm\n"
+                 f"green dot = predicted S1 position")
+    ax.axis('off')
+
+plt.suptitle("Projection sanity check: does the green dot land on the real robot?\n"
+             "Check left/right (mirror) errors especially on frames with large |lateral|",
+             fontsize=13)
 plt.tight_layout()
-plt.savefig(f"{OUT_DIR}/pipeline_test_topdown.png", dpi=150)
-print(f"Saved {OUT_DIR}/pipeline_test_pointcloud.npz and {OUT_DIR}/pipeline_test_topdown.png")
+out_path = f"{OUT_DIR}/projection_check_grid.png"
+plt.savefig(out_path, dpi=140)
+print(f"Saved {out_path}")
