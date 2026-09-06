@@ -10,7 +10,7 @@ from model import ResNetDepth
 from geometric_projection import world_to_camera_frame, project_to_pixel
 
 IMG_DIR = "dataset/rgb"
-POSE_CSV = "dataset/poses/records_20250813-1535-S3.csv"
+POSE_CSV = "dataset/poses/records_20250813-1535.csv"
 INTRINSICS_PATH = "dataset/calib/intrinsics.json"
 GLOBAL_SCALE_PATH = "dataset/calib/global_scale.json"
 WEIGHTS_PATH = "weights/best_model.pth"
