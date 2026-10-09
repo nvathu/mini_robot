@@ -60,19 +60,35 @@ def mask_dynamic_robots(depth_map, row, self_pose, w0, h0):
         if tx not in row or pd.isna(row[tx]):
             continue
         target_pose = {'x': row[tx], 'y': row[f'car_{tgt}_pose_y']}
-        forward, lateral = world_to_camera_frame(self_pose['x'], self_pose['y'], self_pose['angle'],
-                                                    target_pose['x'], target_pose['y'])
-        if forward <= 50:
+        
+        p_cam = world_to_camera_frame(
+            self_pose['x'],    
+            self_pose['y'],     
+            0,                 
+            self_pose['angle'], 
+            target_pose['x'],   
+            target_pose['y'],   
+            0                   
+        )
+        
+
+        forward_mm = p_cam[2] * 1000.0 
+        if forward_mm <= 50:
             continue
-        result = project_to_pixel(forward, lateral, K['fx'], K['fy'], K['cx'], K['cy'])
+            
+
+        result = project_to_pixel(p_cam, K['fx'], K['fy'], K['cx'], K['cy'])
         if result is None:
             continue
+            
         u, v = result
         u_s, v_s = u * 180 / w0, v * 180 / h0
         margin = MARGIN_RATIO * 180
         if not (margin <= u_s < 180 - margin):
             continue
-        r_px = (K['fx'] * ROBOT_SIZE_M / (forward / 1000.0)) * 180 / w0
+            
+
+        r_px = (K['fx'] * ROBOT_SIZE_M / p_cam[2]) * 180 / w0
         cv2.rectangle(masked, (int(u_s - r_px), 0), (int(u_s + r_px), 180), 0, thickness=-1)
     return masked
 
