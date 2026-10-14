@@ -10,7 +10,8 @@ During review, `project_to_pixel()` was found to use the wrong sign compared to 
 
 ```bash
 pip install -r requirements.txt
-python test.py
+python point_could_each.py --resize-depth --voxel ( to generate the point cloud) 
+python visual_each.py (to visual the point cloud)
 ```
 
 Output is saved in `test_projection_output/`, one image per sample with a green dot at the predicted position of robot S1.
