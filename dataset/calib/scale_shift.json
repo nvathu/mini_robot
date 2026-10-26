@@ -1,54 +1,60 @@
 {
   "selected": "affine",
-  "scale": 4.759243666926952,
-  "shift": -19.890487633648686,
+  "scale": 6.986104116844554,
+  "shift": -22.440116975887285,
   "usable": true,
   "unusable_reasons": [],
-  "source": "dino",
-  "n_inliers": 52,
+  "source": "resnet",
+  "n_inliers": 39,
   "cv": {
-    "mae": 0.29289855025986017,
-    "rmse": 0.45573590594180935,
-    "medae": 0.16190671188408357,
-    "median_rel_err": 0.20511445857797242,
-    "bias": 0.06924385719861183
+    "mae": 0.12005131287295613,
+    "rmse": 0.1755002821961572,
+    "medae": 0.07678988274093751,
+    "median_rel_err": 0.10704946194148589,
+    "bias": 0.020146705423973687
   },
   "cv_constant_reference": {
-    "mae": 0.32640028972671703,
-    "rmse": 0.4044228233702951,
-    "medae": 0.25728329686183615,
-    "median_rel_err": 0.3541781488949157,
-    "bias": -0.11320434342981359
+    "mae": 0.32465359440010927,
+    "rmse": 0.38206616004876565,
+    "medae": 0.30563844141034985,
+    "median_rel_err": 0.3801274245411486,
+    "bias": -0.07236171373213064
   },
-  "spearman": 0.5704511794241954,
+  "spearman": 0.8897737556561086,
   "bootstrap_ci_95": {
     "a": [
-      1.6880569887559358,
-      5.859397145697075
+      5.599615953066487,
+      7.653385865349161
     ],
     "b": [
-      -24.615755950075055,
-      -6.6977102431082
+      -24.677309679388124,
+      -17.847458992859664
     ]
   },
-  "n_samples": 94,
-  "n_frames": 81,
+  "n_samples": 51,
   "cv_folds": 5,
   "d_true_range": [
-    0.2467839987427331,
-    1.8216287603009216
+    0.3609032316550888,
+    1.529304561255037
   ],
   "d_pred_range": [
-    4.251351356506348,
-    4.637837886810303
+    3.2534115314483643,
+    3.483705759048462
   ],
   "d_metric_range_on_pred_range": [
-    0.34272938568545896,
-    2.182112957387126
+    0.28855471775367647,
+    1.8974141692762565
   ],
   "inlier_thr_m": 0.15,
   "patch_half_uv": [
-    3,
-    6
+    2,
+    4
+  ],
+  "calibration_source": "floor-contact clicks, d_true = forward_m - body_offset",
+  "body_offset_m": 0.07,
+  "warnings": [
+    "Validated only at floor-contact points of the robots (one session); not walls/objects.",
+    "Outside d_true_range the mapping is extrapolation.",
+    "A wrong body_offset shifts b by roughly the offset error."
   ]
 }

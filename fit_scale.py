@@ -3,8 +3,8 @@
 # Robust fit (MSAC + inlier refit), contiguous-block CV, bootstrap CI, and a usability flag.
 # MoCap is used here only to build the calibration; never at inference time.
 #
-#   python fit_scale.py                  # fit on DINOv3 depth (same source as point_could_each.py)
-#   python fit_scale.py --source resnet  # fit on ResNet student output instead
+#   python fit_scale.py                  # fit on the ResNet student output (default)
+#   python fit_scale.py --source dino    # DINOv3 teacher maps (reference only)
 import argparse
 import json
 import os
@@ -17,10 +17,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from depth_source import DepthSource
+
 SESSION = "2025_0813_1543-S3"
 LABELS_CSV = "dataset/valid_frames/labels.csv"
-DEPTH_ROOT = Path("dataset/depth_dino") / SESSION
-WEIGHTS_PATH = "weights/best_model.pth"
 OUT_DIR = "dataset/calib"
 NET_SIZE = 180          # reference size for --patch-u / --patch-v
 ROBOTS = ["S1", "S2"]
@@ -31,35 +31,16 @@ ROBOTS = ["S1", "S2"]
 # --------------------------------------------------
 
 def load_raw_depths(frames, source):
-    """frames: list of (img_id, img_path). Returns {img_id: (depth HxW, (h0, w0) of RGB)}."""
-    model = device = torch = None
-    if source == "resnet":
-        import torch
-        from model import ResNetDepth
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = ResNetDepth().to(device)
-        model.load_state_dict(torch.load(WEIGHTS_PATH, map_location=device))
-        model.eval()
-
+    """frames: list of (img_id, img_path). Returns {img_id: (raw depth HxW, (h0, w0) of RGB)}."""
+    src = DepthSource(source)
     out = {}
     for img_id, path in frames:
         img = cv2.imread(path)
         if img is None:
             continue
-        shape = img.shape[:2]
-        if source == "dino":
-            dp = DEPTH_ROOT / f"image_{img_id}_depth.npy"
-            if not dp.exists():
-                continue
-            depth = np.squeeze(np.load(dp)).astype(np.float32)
-            if depth.ndim != 2:
-                continue
-        else:
-            rgb = cv2.cvtColor(cv2.resize(img, (NET_SIZE, NET_SIZE)), cv2.COLOR_BGR2RGB)
-            t = torch.from_numpy(rgb / 255.0).permute(2, 0, 1).unsqueeze(0).float().to(device)
-            with torch.no_grad():
-                depth = model(t).squeeze().cpu().numpy()
-        out[img_id] = (depth, shape)
+        depth = src.depth(img_id, img)
+        if depth is not None:
+            out[img_id] = (depth, img.shape[:2])
     return out
 
 
@@ -169,13 +150,52 @@ def bootstrap_ci(x, y, thr, n_boot=300, seed=1):
     return np.percentile(ab[:, 0], [2.5, 97.5]).tolist(), np.percentile(ab[:, 1], [2.5, 97.5]).tolist()
 
 
+def usability(a, a_ci, rho, cv_aff, cv_const):
+    """Reasons the affine fit should not be trusted (empty list = usable)."""
+    reasons = []
+    if a <= 0:
+        reasons.append("a <= 0")
+    if rho < 0.3:
+        reasons.append(f"spearman(d_pred, d_true) = {rho:.2f} < 0.3")
+    if cv_aff["mae"] > 0.9 * cv_const["mae"]:
+        reasons.append("CV MAE not >10% better than predicting a constant")
+    if a_ci[0] <= 0:
+        reasons.append("bootstrap CI of a includes <= 0")
+    return reasons
+
+
+def collect_contact_samples(ann, preds, patch_u, patch_v, body_offset):
+    """Floor-contact clicks (annotations.csv) -> (d_pred, d_true = forward_m - body_offset)."""
+    rows = []
+    for _, r in ann.iterrows():
+        key = str(r["img_id"])
+        if key not in preds:
+            continue
+        depth, (h0, w0) = preds[key]
+        Hd, Wd = depth.shape
+        pu = max(1, int(round(patch_u * Wd / NET_SIZE)))
+        pv = max(1, int(round(patch_v * Hd / NET_SIZE)))
+        ui = int(round(r["u_contact"] * Wd / w0))
+        vi = int(round(r["v_contact"] * Hd / h0))
+        z = float(r["forward_m"]) - body_offset
+        if not (0 <= ui < Wd and 0 <= vi < Hd) or z <= 0.1:
+            continue
+        patch = depth[max(vi - pv, 0):vi + pv + 1, max(ui - pu, 0):ui + pu + 1]
+        patch = patch[np.isfinite(patch) & (patch > 1e-3)]
+        if patch.size < 0.6 * (2 * pu + 1) * (2 * pv + 1):
+            continue
+        rows.append({"img_id": key, "robot": r.get("robot", "?"),
+                     "d_pred": float(np.median(patch)), "d_true": z})
+    return pd.DataFrame(rows)
+
+
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source", choices=["dino", "resnet"], default="dino",
+    ap.add_argument("--source", choices=["dino", "resnet"], default="resnet",
                     help="raw depth to calibrate; must match what point_could_each.py unprojects")
     ap.add_argument("--patch-u", type=int, default=3, help="half-width of depth patch (180-px units)")
     ap.add_argument("--patch-v", type=int, default=6, help="half-height of depth patch (180-px units)")
@@ -210,15 +230,7 @@ def main():
     metric_span = [a * lo + b, a * hi + b]
 
     # usable = network carries distance information AND affine beats the constant reference
-    reasons = []
-    if a <= 0:
-        reasons.append("a <= 0")
-    if rho < 0.3:
-        reasons.append(f"spearman(d_pred, d_true) = {rho:.2f} < 0.3")
-    if cv_aff["mae"] > 0.9 * cv_const["mae"]:
-        reasons.append("CV MAE not >10% better than predicting a constant")
-    if a_ci[0] <= 0:
-        reasons.append("bootstrap CI of a includes <= 0")
+    reasons = usability(a, a_ci, rho, cv_aff, cv_const)
     usable = len(reasons) == 0
 
     print(f"\naffine: a={a:.4f} b={b:.4f} | inliers {int(inl.sum())}/{n}")

@@ -1,7 +1,8 @@
 {
-  "fx": 750.0073621574767,
-  "fy": 750.0073621574767,
-  "cx": 320.0,
-  "cy": 240.0,
-  "source": "computed from published FOV=70deg, resolution=640x480 (Osoyoo Pi Robot Car spec)"
+  "fx": 717.0,
+  "fy": 725.01303987,
+  "cx": 324.12452038,
+  "cy": 246.52137129,
+  "width": 640,
+  "height": 480
 }

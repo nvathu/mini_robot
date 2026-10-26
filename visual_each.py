@@ -1,389 +1,303 @@
+# visual_each.py
+#
+# Viewer for the clouds written by point_could_each.py.
+#   python visual_each.py                 # browse per-frame clouds
+#   python visual_each.py --merged        # start with the fused global model
+#   python visual_each.py --start 10 --frame world
+#
+# Keys:
+#   Right / Left : next / previous frame        M : toggle fused model <-> per-frame
+#   C / W        : camera frame / world frame   1 : front view, 2 : top-down, 3 : oblique
+#   Esc          : quit                         +/- (Open3D built-in) : point size
+#
+# Display conventions (proper rotations, no mirroring):
+#   camera : optical [X right, Y down, Z fwd]  -> [X, -Y, -Z]  (looks like the camera image)
+#   world  : stored [x, up, y]                  -> [x, up, -y]  (top-down = standard map, y up)
+# Markers: S1 = green, S2 = red (MoCap, offline reference only).
+# Camera: camera frame -> camera = origin of the RGB axes (looks along -Z of the screen = into the scene);
+#         world frame / fused model -> blue frustum = camera pose (apex = camera, opens toward the viewing direction).
+
+import argparse
 from pathlib import Path
-import glfw
+
 import numpy as np
 import open3d as o3d
 
+SESSION = "2025_0813_1543-S3"
+POINTCLOUD_DIR = Path("dataset/pointclouds") / SESSION
+MERGED_PATH = Path("dataset/pointclouds") / f"{SESSION}_merged.npz"
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+WINDOW_W, WINDOW_H = 1280, 800
+POINT_SIZE = 2.0
+BACKGROUND = [1.0, 1.0, 1.0]
+MARKER_RADIUS = 0.03
+MAX_MERGED_MARKERS = 300
+MARKER_COLORS = {"S1": [0.0, 0.7, 0.0], "S2": [0.9, 0.0, 0.0]}
 
-POINTCLOUD_DIR = Path(
-    "dataset/pointclouds/2025_0813_1543-S3"
-)
-
-# Select the coordinate system: "camera" or "world".
-COORDINATE_FRAME = "camera"
-FLIP_CAMERA_Y_FOR_DISPLAY = True
-
-# Maximum number of points displayed per point cloud.
-# Set to None to display all points.
-MAX_POINTS = None  # Display every point saved in the NPZ file.
-
-# Point cloud visualization settings.
-WINDOW_WIDTH = 1280
-WINDOW_HEIGHT = 800
-POINT_SIZE = 4.5  # Larger points are easier to see.
-
-# Background color in RGB format, with values in [0, 1].
-BACKGROUND_COLOR = [1.0, 1.0, 1.0]
-VIEW_FRONT = [0.0, 0.0, -1.0]
-VIEW_UP = [0.0, -1.0, 0.0]
-
-INITIAL_ZOOM = 0.55
-
-# ============================================================
-# LOAD POINT CLOUD
-# ============================================================
-
-def load_pointcloud(npz_path, coordinate_frame="camera"):
-    """
-    Load a point cloud from an NPZ file.
-
-    Parameters
-    ----------
-    npz_path : Path
-        Path to the NPZ file.
-    coordinate_frame : str
-        Coordinate system: "camera" or "world".
-
-    Returns
-    -------
-    pcd : open3d.geometry.PointCloud or None
-        Loaded point cloud, or None if invalid.
-    img_id : str
-        Corresponding image ID.
-    """
-
-    with np.load(npz_path, allow_pickle=False) as data:
-
-        if coordinate_frame == "camera":
-            key = "points_camera"
-        elif coordinate_frame == "world":
-            key = "points_world"
-        else:
-            raise ValueError(
-                "coordinate_frame must be 'camera' or 'world'."
-            )
-
-        if key not in data:
-            print(f"[SKIP] {npz_path.name}: missing {key}")
-            return None, npz_path.stem
-
-        points = np.asarray(data[key], dtype=np.float64)
-
-        if points.ndim != 2 or points.shape[1] != 3:
-            print(
-                f"[SKIP] {npz_path.name}: "
-                f"invalid point array shape {points.shape}"
-            )
-            return None, npz_path.stem
-        if "colors" in data:
-            colors = np.asarray(data["colors"], dtype=np.float64)
-        else:
-            colors = None
-
-        if "img_id" in data:
-            img_id = str(data["img_id"].item())
-        else:
-            img_id = npz_path.stem
-
-        # Remove points with invalid coordinates.
-        valid = np.isfinite(points).all(axis=1)
-        points = points[valid]
-
-        # Keep colors aligned with the remaining points.
-        if colors is not None and len(colors) == len(valid):
-            colors = colors[valid]
-        else:
-            colors = None
-
-        if len(points) == 0:
-            print(f"[SKIP] {npz_path.name}: empty point cloud")
-            return None, img_id
-
-        # Randomly subsample large point clouds for faster rendering.
-        if MAX_POINTS is not None and len(points) > MAX_POINTS:
-            rng = np.random.default_rng(42)
-
-            indices = rng.choice(
-                len(points),
-                size=MAX_POINTS,
-                replace=False
-            )
-
-            points = points[indices]
-
-            if colors is not None:
-                colors = colors[indices]
-
-        # Create the Open3D point cloud.
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
-
-        if colors is not None and len(colors) > 0:
-
-            # Convert colors to the [0, 1] range if necessary.
-            if colors.max() > 1.0:
-                colors = colors / 255.0
-
-            colors = np.clip(colors, 0.0, 1.0)
-
-            # Keep the original RGB color associated with each point.
-            # Do not call colorize_by_depth(), because that would overwrite
-            # the RGB colors sampled from the corresponding image pixels.
-            pcd.colors = o3d.utility.Vector3dVector(colors)
-
-        return pcd, img_id
+KEY_RIGHT, KEY_LEFT, KEY_ESC = 262, 263, 256
 
 
+# --------------------------------------------------
+# Coordinate helpers
+# --------------------------------------------------
+
+def to_display(points, frame):
+    p = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if frame == "camera":
+        return p * np.array([1.0, -1.0, -1.0])
+    return p * np.array([1.0, 1.0, -1.0])
 
 
-def colorize_by_depth(pcd):
-    """
-    Colorize points using different shades of blue based on depth.
-    Near points are dark blue, while far points are light blue.
-    """
-
-    points = np.asarray(pcd.points)
-
-    if len(points) == 0:
-        return pcd
-
-    # Use camera Z as depth.
-    if COORDINATE_FRAME == "camera":
-        depth = points[:, 2]
-    else:
-        depth = np.linalg.norm(points, axis=1)
-
-    valid = np.isfinite(depth)
-
-    if not np.any(valid):
-        return pcd
-
-    # Use percentiles to reduce the influence of outliers.
-    d_min, d_max = np.percentile(depth[valid], [2, 98])
-
-    if d_max <= d_min:
-        d_max = d_min + 1e-6
-
-    # Normalize depth to [0, 1].
-    normalized = np.clip(
-        (depth - d_min) / (d_max - d_min),
-        0.0,
-        1.0
-    )
-
-    # Keep one hue: dark blue for near points, light blue for far points.
-    near_color = np.array([0.02, 0.12, 0.45])
-    far_color = np.array([0.65, 0.82, 1.00])
-
-    colors = (
-        (1.0 - normalized[:, None]) * near_color
-        + normalized[:, None] * far_color
-    )
-
-    # Assign neutral gray to invalid points.
-    colors[~valid] = [0.5, 0.5, 0.5]
-
-    pcd.colors = o3d.utility.Vector3dVector(colors)
-
+def make_cloud(points, colors):
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    if colors is not None and len(colors) == len(points):
+        pcd.colors = o3d.utility.Vector3dVector(np.clip(colors.astype(np.float64), 0, 1))
     return pcd
-# ============================================================
-# LOAD ALL VALID POINT CLOUDS
-# ============================================================
-
-def load_all_pointclouds():
-    """
-    Load all valid NPZ point clouds from the configured directory.
-
-    Returns
-    -------
-    list
-        A list of tuples: (file_path, image_id, point_cloud).
-    """
-
-    if not POINTCLOUD_DIR.exists():
-        print(f"[ERROR] Directory not found: {POINTCLOUD_DIR}")
-        return []
-
-    files = sorted(POINTCLOUD_DIR.glob("*.npz"))
-
-    if not files:
-        print(f"[ERROR] No NPZ files found in {POINTCLOUD_DIR}")
-        return []
-
-    print(f"Found {len(files)} NPZ files.")
-    print("Loading point clouds...")
-
-    valid_clouds = []
-
-    for path in files:
-        try:
-            pcd, img_id = load_pointcloud(
-                path,
-                coordinate_frame=COORDINATE_FRAME
-            )
-
-            if pcd is not None and len(pcd.points) > 0:
-                valid_clouds.append((path, img_id, pcd))
-
-        except Exception as error:
-            print(f"[SKIP] {path.name}: {error}")
-
-    print(f"Successfully loaded {len(valid_clouds)} valid point clouds.")
-
-    return valid_clouds
 
 
-# ============================================================
-# VISUALIZE POINT CLOUDS
-# ============================================================
+def make_markers(points_disp, names, max_n=None):
+    meshes = []
+    idx = np.arange(len(points_disp))
+    if max_n is not None and len(idx) > max_n:
+        idx = idx[np.linspace(0, len(idx) - 1, max_n).astype(int)]
+    for i in idx:
+        m = o3d.geometry.TriangleMesh.create_sphere(radius=MARKER_RADIUS, resolution=8)
+        m.translate(points_disp[i])
+        m.paint_uniform_color(MARKER_COLORS.get(str(names[i]), [0.0, 0.0, 0.0]))
+        meshes.append(m)
+    return meshes
 
-def visualize_all_pointclouds():
-    """
-    Visualize point clouds one at a time.
 
-    Right Arrow : Next point cloud.
-    Left Arrow  : Previous point cloud.
-    Q           : Exit the viewer.
-    """
+def make_frustum(cam, yaw_deg, K, length=0.4, color=(0.0, 0.0, 1.0)):
+    """Camera frustum in stored world coords [x, up, y]; returns a LineSet in display coords."""
+    fx, fy, cx, cy = [float(v) for v in K]
+    if fx <= 0 or fy <= 0:
+        return None
+    th, tv = cx / fx, cy / fy
+    yaw = np.radians(yaw_deg)
+    fwd = np.array([np.cos(yaw), 0.0, np.sin(yaw)])
+    left = np.array([-np.sin(yaw), 0.0, np.cos(yaw)])
+    up = np.array([0.0, 1.0, 0.0])
+    cam = np.asarray(cam, dtype=np.float64).reshape(3)
+    corners = [cam + length * (fwd - sx * th * left + sy * tv * up)
+               for sx, sy in ((-1, -1), (-1, 1), (1, 1), (1, -1))]
+    pts = to_display(np.vstack([cam] + corners), "world")
+    ls = o3d.geometry.LineSet()
+    ls.points = o3d.utility.Vector3dVector(pts)
+    ls.lines = o3d.utility.Vector2iVector(
+        [[0, 1], [0, 2], [0, 3], [0, 4], [1, 2], [2, 3], [3, 4], [4, 1]])
+    ls.colors = o3d.utility.Vector3dVector(np.tile(color, (8, 1)))
+    return ls
 
-    valid_clouds = load_all_pointclouds()
 
-    if not valid_clouds:
-        print("[ERROR] No valid point clouds to visualize.")
+def make_polyline(points_disp, color):
+    if len(points_disp) < 2:
+        return None
+    ls = o3d.geometry.LineSet()
+    ls.points = o3d.utility.Vector3dVector(points_disp)
+    ls.lines = o3d.utility.Vector2iVector(
+        np.column_stack([np.arange(len(points_disp) - 1), np.arange(1, len(points_disp))]))
+    ls.colors = o3d.utility.Vector3dVector(np.tile(color, (len(points_disp) - 1, 1)))
+    return ls
+
+
+# --------------------------------------------------
+# Loading
+# --------------------------------------------------
+
+def load_frame(path, frame):
+    with np.load(path, allow_pickle=False) as d:
+        key = "points_camera" if frame == "camera" else "points_world"
+        pts, cols = d[key], d["colors"]
+        if len(pts) == 0 or len(pts) != len(cols):
+            return None
+        info = {
+            "img_id": str(d["img_id"]),
+            "valid": [str(x) for x in d["valid_robots"]],
+            "names": [str(x) for x in d["robot_names"]],
+            "robots": d["robot_cam" if frame == "camera" else "robot_world"],
+            "cam_pos": d["cam_pos_world"],
+            "yaw": float(d["yaw_deg"]),
+            "K": d["K_used"],
+        }
+    ok = np.isfinite(pts).all(axis=1)
+    return pts[ok], cols[ok], info
+
+
+def load_merged(path):
+    with np.load(path, allow_pickle=False) as d:
+        return {k: d[k] for k in d.files}
+
+
+# --------------------------------------------------
+# Scene builders
+# --------------------------------------------------
+
+def build_frame_scene(path, frame):
+    loaded = load_frame(path, frame)
+    if loaded is None:
+        return None, None
+    pts, cols, info = loaded
+    geoms = [make_cloud(to_display(pts, frame), cols)]
+
+    if len(info["robots"]):
+        geoms += make_markers(to_display(info["robots"], frame), info["names"])
+
+    if frame == "camera":
+        geoms.append(o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.15))
+    else:
+        frustum = make_frustum(info["cam_pos"][0] if info["cam_pos"].ndim > 1 else info["cam_pos"],
+                               info["yaw"], info["K"])
+        if frustum is not None:
+            geoms.append(frustum)
+        geoms.append(o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.3))
+
+    summary = (f"{info['img_id']} | {len(pts)} pts | valid robots: {info['valid'] or '-'} | "
+               + ", ".join(f"{n} fwd={p[2]:.2f} m" if frame == "camera" else n
+                           for n, p in zip(info["names"], info["robots"])))
+    return geoms, summary
+
+
+def build_merged_scene(merged):
+    pts = to_display(merged["points"], "world")
+    geoms = [make_cloud(pts, merged["colors"])]
+    path = make_polyline(to_display(merged["cam_path"], "world"), [0.0, 0.0, 1.0])
+    if path is not None:
+        geoms.append(path)
+    if len(merged["robot_points"]):
+        geoms += make_markers(to_display(merged["robot_points"], "world"),
+                              merged["robot_names"], MAX_MERGED_MARKERS)
+    if "cam_yaw" in merged and "K_used" in merged and len(merged["cam_yaw"]):
+        n = len(merged["cam_yaw"])
+        for i in np.linspace(0, n - 1, min(n, 25)).astype(int):
+            fr = make_frustum(merged["cam_path"][i], merged["cam_yaw"][i], merged["K_used"], length=0.25)
+            if fr is not None:
+                geoms.append(fr)
+    geoms.append(o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.3))
+    return geoms, f"fused model | {len(pts)} pts | {len(merged['cam_path'])} camera poses"
+
+
+# --------------------------------------------------
+# Viewer
+# --------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--merged", action="store_true", help="start with the fused model")
+    ap.add_argument("--frame", choices=["camera", "world"], default="camera")
+    ap.add_argument("--start", type=int, default=0)
+    args = ap.parse_args()
+
+    files = sorted(POINTCLOUD_DIR.glob("image_*.npz"))
+    merged = load_merged(MERGED_PATH) if MERGED_PATH.exists() else None
+    if not files and merged is None:
+        print(f"[ERROR] Nothing to show in {POINTCLOUD_DIR} / {MERGED_PATH}")
         return
-
-    # Create the Open3D visualizer.
-    vis = o3d.visualization.VisualizerWithKeyCallback()
-
-    created = vis.create_window(
-        window_name="Point Cloud Viewer",
-        width=WINDOW_WIDTH,
-        height=WINDOW_HEIGHT
-    )
-
-    if not created:
-        print("[ERROR] Failed to create the Open3D window.")
-        return
+    if args.merged and merged is None:
+        print(f"[WARN] {MERGED_PATH} not found, starting in per-frame mode")
 
     state = {
-        "index": 0,
-        "geometry": valid_clouds[0][2]
+        "mode": "merged" if (args.merged and merged is not None) or not files else "frame",
+        "frame": args.frame,
+        "index": int(np.clip(args.start, 0, max(len(files) - 1, 0))),
+        "view": "front" if args.frame == "camera" else "top",
     }
 
-    # Display the first point cloud.
-    vis.add_geometry(state["geometry"])
+    vis = o3d.visualization.VisualizerWithKeyCallback()
+    if not vis.create_window("Point Cloud Viewer", WINDOW_W, WINDOW_H):
+        print("[ERROR] Failed to create the Open3D window.")
+        return
+    opt = vis.get_render_option()
+    opt.background_color = np.asarray(BACKGROUND)
+    opt.point_size = POINT_SIZE
+    opt.show_coordinate_frame = False
 
-    # Configure the rendering options.
-    render_option = vis.get_render_option()
-    render_option.background_color = np.asarray(BACKGROUND_COLOR)
-    render_option.point_size = POINT_SIZE
-    render_option.show_coordinate_frame = True
+    def set_view(center):
+        vc = vis.get_view_control()
+        front, up = {
+            "front": ([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+            "top": ([0.0, 1.0, 0.0], [0.0, 0.0, -1.0]),
+            "oblique": ([-0.35, 0.65, 0.65], [0.0, 1.0, 0.0]),
+        }[state["view"]]
+        vc.set_lookat(center)
+        vc.set_front(front)
+        vc.set_up(up)
+        vc.set_zoom(0.5)
 
-    view_control = vis.get_view_control()
-    view_control.set_lookat(
-        state["geometry"].get_center()
-    )
-    view_control.set_front(VIEW_FRONT)
-    view_control.set_up(VIEW_UP)
-    view_control.set_zoom(INITIAL_ZOOM)
-    vis.poll_events()
-    vis.update_renderer()
+    def show(reset_view):
+        if state["mode"] == "merged":
+            geoms, summary = build_merged_scene(merged)
+        else:
+            geoms, summary = None, None
+            # skip unreadable frames
+            for _ in range(len(files)):
+                geoms, summary = build_frame_scene(files[state["index"]], state["frame"])
+                if geoms is not None:
+                    break
+                state["index"] = (state["index"] + 1) % len(files)
+            if geoms is None:
+                print("[ERROR] No readable frame.")
+                return
+            summary = f"[{state['index'] + 1}/{len(files)}] {state['frame']} | {summary}"
+        vis.clear_geometries()
+        for g in geoms:
+            vis.add_geometry(g, reset_bounding_box=reset_view)
+        if reset_view:
+            set_view(geoms[0].get_center())
+        print(summary)
 
-    def print_current_info():
-        """Print information about the current point cloud."""
+    def step(delta):
+        def cb(_):
+            if state["mode"] == "frame" and files:
+                state["index"] = (state["index"] + delta) % len(files)
+                show(reset_view=False)
+            return True
+        return cb
 
-        path, img_id, pcd = valid_clouds[state["index"]]
+    def set_frame(frame):
+        def cb(_):
+            state["frame"] = frame
+            state["mode"] = "frame" if files else state["mode"]
+            state["view"] = "front" if frame == "camera" else "top"
+            show(reset_view=True)
+            return True
+        return cb
 
-        print(
-            f"[{state['index'] + 1}/{len(valid_clouds)}] "
-            f"Image ID: {img_id} | "
-            f"File: {path.name} | "
-            f"Points: {len(pcd.points)}"
-        )
-
-    def change_pointcloud(step):
-        """Create a keyboard callback to navigate between point clouds."""
-
-        def callback(viewer):
-            old_geometry = state["geometry"]
-
-            # Remove the currently displayed point cloud.
-            viewer.remove_geometry(
-                old_geometry,
-                reset_bounding_box=False
-            )
-
-            # Move forward or backward, wrapping around at the ends.
-            state["index"] = (
-                state["index"] + step
-            ) % len(valid_clouds)
-
-            path, img_id, new_geometry = valid_clouds[state["index"]]
-
-            state["geometry"] = new_geometry
-
-            # Display the new point cloud.
-            viewer.add_geometry(
-                new_geometry,
-                reset_bounding_box=False
-            )
-
-            print_current_info()
-
+    def toggle_merged(_):
+        if merged is None:
+            print("[WARN] fused model missing - run point_could_each.py without --no-merge")
             return False
+        state["mode"] = "frame" if state["mode"] == "merged" and files else "merged"
+        if state["mode"] == "merged":
+            state["view"] = "top"
+        show(reset_view=True)
+        return True
 
-        return callback
+    def set_view_key(name):
+        def cb(_):
+            state["view"] = name
+            show(reset_view=True)
+            return True
+        return cb
 
-    def quit_viewer(viewer):
-        """Close the visualization window."""
+    vis.register_key_callback(KEY_RIGHT, step(1))
+    vis.register_key_callback(KEY_LEFT, step(-1))
+    vis.register_key_callback(KEY_ESC, lambda v: v.close() or False)
+    vis.register_key_callback(ord("C"), set_frame("camera"))
+    vis.register_key_callback(ord("W"), set_frame("world"))
+    vis.register_key_callback(ord("M"), toggle_merged)
+    vis.register_key_callback(ord("1"), set_view_key("front"))
+    vis.register_key_callback(ord("2"), set_view_key("top"))
+    vis.register_key_callback(ord("3"), set_view_key("oblique"))
 
-        viewer.close()
-        return False
-
-    # Register keyboard callbacks using GLFW key codes.
-    vis.register_key_callback(
-        glfw.KEY_RIGHT,
-        change_pointcloud(1)
-    )
-
-    vis.register_key_callback(
-        glfw.KEY_LEFT,
-        change_pointcloud(-1)
-    )
-
-    vis.register_key_callback(
-        glfw.KEY_ESCAPE,
-        quit_viewer
-    )
-
-    print("\nKeyboard controls:")
-    print("  Right Arrow : Next point cloud")
-    print("  Left Arrow  : Previous point cloud")
-    print("  Esc       : Exit")
-    print("  Mouse       : Rotate, zoom, and move the view")
-
-    print("\nCoordinate frame:")
-    print("  X (Red)     : Horizontal axis")
-    print("  Y (Green)   : Vertical axis")
-    print("  Z (Blue)    : Camera viewing direction")
-    print("  Note        : The exact convention depends on how")
-    print("                the camera point cloud was generated.")
-    print("  Point color : Original RGB color from the corresponding image")
-    print_current_info()
-
-    # Run the visualization event loop.
+    print(__doc__)
+    show(reset_view=True)
     try:
         vis.run()
     finally:
         vis.destroy_window()
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
 if __name__ == "__main__":
-    visualize_all_pointclouds()
+    main()

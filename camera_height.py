@@ -10,6 +10,7 @@ B2  python estimate_cam_height.py fit          # in h, pitch, khoang tin cay
 Phim trong cua so: click = chon diem | Enter/Space = chap nhan | s = bo qua | q = thoat
 """
 import argparse
+import json
 import os
 
 import cv2
@@ -123,6 +124,13 @@ def cmd_fit(a):
     if abs(c) > 15:
         print("WARNING: large offset -> camera can be tilted; dy follow the 'horizontal' can be wrong.")
     print(f"\n=> Corrected height: {h:.3f} (contact point = robot ground contact).")
+    # point_could_each.py assumes pitch = 0 -> store the pitch=0 height
+    os.makedirs(os.path.dirname(a.height_json), exist_ok=True)
+    with open(a.height_json, "w") as f:
+        json.dump({"h_c_m": float(h0), "h_affine_m": float(h), "h_ci95_m": [float(lo), float(hi)],
+                   "horizon_offset_px": float(c), "n": int(len(Z)), "body_offset_m": a.body_offset,
+                   "fy": FY, "cy": CY}, f, indent=2)
+    print(f"Saved {a.height_json} (h_c_m = pitch-0 height {h0:.3f} m)")
 
 
 ap = argparse.ArgumentParser()
@@ -136,6 +144,7 @@ for name, fn in (("annotate", cmd_annotate), ("fit", cmd_fit)):
     s.add_argument("--dump", action="store_true")
     s.add_argument("--body-offset", type=float, default=0.0,
                    help="m: distance marker to robot contact point (if known)")
+    s.add_argument("--height-json", default="dataset/calib/camera_height.json")
     s.add_argument("--fy", type=float, default=FY)
     s.add_argument("--cy", type=float, default=CY)
     s.add_argument("--cx", type=float, default=CX)
