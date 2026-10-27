@@ -20,6 +20,7 @@ Output is saved in `test_projection_output/`, one image per sample with a green 
 ## Interpreting the results
 After tyoe  python visual_each.py , a  window show pointcloud will appear 
 ![Demo](dataset/pointclouds/demo.png)
+```
 Keyboard controls:
   Right Arrow : Next point cloud
   Left Arrow  : Previous point cloud
@@ -34,7 +35,7 @@ Coordinate frame:
   blue line: path of the robot
   Camera: camera frame -> camera = origin of the RGB axes (looks along -Z of the screen = into the scene);
   world frame / fused model -> blue frustum = camera pose (apex = camera, opens toward the viewing direction)
-
+```)
 ## Folder structure
 
 ```
