@@ -1,8 +1,11 @@
 {
-  "fx": 717.0,
+  "fx": 717.48171858,
   "fy": 725.01303987,
   "cx": 324.12452038,
   "cy": 246.52137129,
+  "dist": [-0.29546888, -0.09361742, 0.000393637, -0.0124916, -0.5106675],
+  "dist_order": "OpenCV: k1, k2, p1, p2, k3",
   "width": 640,
-  "height": 480
+  "height": 480,
+  "source": "teacher-provided calibration, camera_id 0"
 }
