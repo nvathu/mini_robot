@@ -35,7 +35,7 @@ Coordinate frame:
   blue line: path of the robot
   Camera: camera frame -> camera = origin of the RGB axes (looks along -Z of the screen = into the scene);
   world frame / fused model -> blue frustum = camera pose (apex = camera, opens toward the viewing direction)
-```)
+```
 ## Folder structure
 
 ```
