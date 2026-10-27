@@ -18,7 +18,8 @@ python visual_each.py (to visual the point cloud)
 Output is saved in `test_projection_output/`, one image per sample with a green dot at the predicted position of robot S1.
 
 ## Interpreting the results
-After tyoe  python visual_each.py , a  window show pointcloud will appear an
+After tyoe  python visual_each.py , a  window show pointcloud will appear 
+![Demo](dataset/pointclouds/demo.png)
 Keyboard controls:
   Right Arrow : Next point cloud
   Left Arrow  : Previous point cloud
@@ -30,6 +31,7 @@ Keyboard controls:
 
 Coordinate frame:
   Markers: S1 = green, S2 = red (MoCap, offline reference only).
+  blue line: path of the robot
   Camera: camera frame -> camera = origin of the RGB axes (looks along -Z of the screen = into the scene);
   world frame / fused model -> blue frustum = camera pose (apex = camera, opens toward the viewing direction)
 
